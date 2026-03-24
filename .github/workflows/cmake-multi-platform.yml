@@ -4,9 +4,16 @@ name: CMake on multiple platforms
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
+    paths-ignore:
+      - coverage.svg
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
+    paths-ignore:
+      - coverage.svg
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -83,6 +90,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.head_ref || github.ref_name }}
 
     - name: Install gcovr
       run: |
@@ -107,10 +116,65 @@ jobs:
         ./tests/runTests || true
         # Используем gcovr для генерации отчета
         gcovr -r .. --filter ../src/ --exclude ../tests/ --exclude ../extern/ --html --html-details -o coverage_report.html
-        # Также генерируем XML для Codecov
+        # Генерируем XML-отчет, из которого будет строиться локальный badge
         gcovr -r .. --filter ../src/ --exclude ../tests/ --exclude ../extern/ --xml > coverage.xml
         # Показываем сводку покрытия
         gcovr -r .. --filter ../src/ --exclude ../tests/ --exclude ../extern/
+
+    - name: Generate local coverage badge
+      run: |
+        python3 - <<'PY'
+        import xml.etree.ElementTree as ET
+        from pathlib import Path
+
+        root = ET.parse("build/coverage.xml").getroot()
+        line_rate = float(root.attrib.get("line-rate", "0"))
+        percent = round(line_rate * 100, 1)
+
+        if percent >= 90:
+            color = "#4c1"
+        elif percent >= 75:
+            color = "#97CA00"
+        elif percent >= 60:
+            color = "#dfb317"
+        else:
+            color = "#e05d44"
+
+        label = "coverage"
+        value = f"{percent:.1f}%"
+        left_width = 74
+        right_width = max(52, 10 * len(value) + 12)
+        total_width = left_width + right_width
+        left_text_x = left_width / 2
+        right_text_x = left_width + right_width / 2
+
+        svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{total_width}" height="20" role="img" aria-label="{label}: {value}">
+        <linearGradient id="s" x2="0" y2="100%">
+        <stop offset="0" stop-color="#fff" stop-opacity=".7"/>
+        <stop offset=".1" stop-color="#aaa" stop-opacity=".1"/>
+        <stop offset=".9" stop-color="#000" stop-opacity=".3"/>
+        <stop offset="1" stop-color="#000" stop-opacity=".5"/>
+        </linearGradient>
+        <clipPath id="r">
+        <rect width="{total_width}" height="20" rx="3" fill="#fff"/>
+        </clipPath>
+        <g clip-path="url(#r)">
+        <rect width="{left_width}" height="20" fill="#555"/>
+        <rect x="{left_width}" width="{right_width}" height="20" fill="{color}"/>
+        <rect width="{total_width}" height="20" fill="url(#s)"/>
+        </g>
+        <g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">
+        <text x="{left_text_x}" y="15" fill="#010101" fill-opacity=".3">{label}</text>
+        <text x="{left_text_x}" y="14">{label}</text>
+        <text x="{right_text_x}" y="15" fill="#010101" fill-opacity=".3">{value}</text>
+        <text x="{right_text_x}" y="14">{value}</text>
+        </g>
+        </svg>
+        """
+
+        Path("coverage.svg").write_text(svg, encoding="utf-8")
+        print(f"Coverage badge updated: {value}")
+        PY
 
     - name: Upload coverage reports
       uses: actions/upload-artifact@v4
@@ -121,26 +185,15 @@ jobs:
           build/coverage.xml
         retention-days: 30
 
-    - name: Upload to Codecov
-      uses: codecov/codecov-action@v3
-      with:
-        file: build/coverage.xml
-        flags: unittests
-        name: codecov-umbrella
-        fail_ci_if_error: false
-
-  # coverage-badge:
-  #   runs-on: ubuntu-latest
-  #   needs: coverage
-  #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-  #   steps:
-  #   - name: Update coverage badge
-  #     uses: schneegans/dynamic-badges-action@v1.6.0
-  #     with:
-  #       auth: ${{ secrets.GIST_SECRET }}
-  #       gistID: YOUR_GIST_ID_HERE
-  #       filename: coverage.json
-  #       label: Coverage
-  #       message: ${{ needs.coverage.result == 'success' && 'passing' || 'failing' }}
-  #       color: ${{ needs.coverage.result == 'success' && 'green' || 'red' }}
+    - name: Commit coverage badge
+      if: github.event_name == 'push'
+      run: |
+        if git diff --quiet -- coverage.svg; then
+          echo "coverage.svg is up to date"
+          exit 0
+        fi
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add coverage.svg
+        git commit -m "Update coverage badge [skip ci]"
+        git push origin HEAD:${{ github.ref_name }}
